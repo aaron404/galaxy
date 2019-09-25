@@ -1,9 +1,11 @@
+from __future__ import absolute_import
+
 import ctypes
 import functools
 import math
 import random
 import time
-
+import pdb
 import numpy as np
 import mathutils
 
@@ -11,6 +13,13 @@ import OpenGL.GL as gl
 import OpenGL.GL.shaders as shaders
 import OpenGL.GLU as glu
 import OpenGL.GLUT as glut
+from OpenGL.arrays import vbo
+
+import pyopencl as cl; mf = cl.mem_flags
+import pyopencl.cltypes as cltypes
+import pyopencl.array as clarray
+from pyopencl.tools import get_gl_sharing_context_properties
+
 
 from Transform import Transform
 
@@ -40,6 +49,7 @@ z_id = None
 
 draw_axes = True
 draw_grid = True
+pause     = True
 
 MOUSE_BUTTON_LEFT = 0
 MOUSE_BUTTON_MIDDLE = 1
@@ -51,6 +61,7 @@ MOUSE_BUTTON_WHEEL_DOWN = 4
 # Shaders
 vertex_shader = open("vertex.c", "r").read()
 fragment_shader = open("fragment.c", "r").read()
+ 
 
 class Galaxy():
     '''
@@ -61,7 +72,6 @@ class Galaxy():
     def __init__(self, position, mass=1, body_count=-1, color=(1, 1, 1), ecc=1.0, camera=None):
         global shader, eye_id
         self.transform = Transform(pos=position, rot=-1)
-        print("galaxy created: {}".format(self.position))
         self.velocity = mathutils.Vector(-Universe.dt * self.position + (Universe.dt / 3) * Transform.random_vector())
         self.mass = mass
         self.body_count = body_count
@@ -70,10 +80,14 @@ class Galaxy():
         self.camera=camera
 
         self.body_positions = None
+        self.body_positions_vbo = None
+        self.body_positions_cl_buffer = None
         self.body_velocities = None
+        self.body_velocities_vbo = None
+        self.body_velocities_cl_buffer = None
 
         if self.body_count < 0:
-            self.body_count = 1000
+            self.body_count = 100000
 
         self.vertex_array = None
         self.vertex_buffer = None
@@ -98,12 +112,13 @@ class Galaxy():
         self._gl_setup()
 
     def _generate_bodies(self):
-        self.body_positions = np.zeros((self.body_count, 3), dtype=np.float32)
-        self.body_velocities = np.zeros((self.body_count, 3), dtype=np.float32)
-        
+        self.body_positions = np.ndarray((self.body_count, 3), dtype=np.float32)
+        self.body_velocities = np.ndarray((self.body_count, 3), dtype=np.float32)
+
         r1 = 0.5
         r2 = 2.5
         sigma = 0.25
+
         mu = (r1 + r2) / 2
         
         for i in range(self.body_count):
@@ -121,6 +136,7 @@ class Galaxy():
             self.body_positions[i][0] = body_position.x
             self.body_positions[i][1] = body_position.y
             self.body_positions[i][2] = body_position.z
+            #self.body_positions[i][3] = 0
             
             # position relative to galaxy center
             delta = body_position - self.position
@@ -128,56 +144,79 @@ class Galaxy():
             # tangential orbital velocity        
             velocity = self.up.cross(delta).normalized() * (Universe.G / delta.length) ** 0.5
             #velocity = (Universe.G * self.mass / r) ** 0.5 * velocity
-            self.body_velocities[i] = velocity + self.velocity
+            velocity += self.velocity
+            self.body_velocities[i][0] = velocity.x
+            self.body_velocities[i][1] = velocity.y
+            self.body_velocities[i][2] = velocity.z
 
+        # construct vertex buffer objects
+        self.body_positions_vbo = vbo.VBO(data=self.body_positions, usage=gl.GL_DYNAMIC_DRAW, target=gl.GL_ARRAY_BUFFER)
+        self.body_positions_vbo.bind()
+        
+        self.body_velocities_vbo = vbo.VBO(data=self.body_velocities, usage=gl.GL_DYNAMIC_DRAW, target=gl.GL_ARRAY_BUFFER)
+        self.body_velocities_vbo.bind()
+
+    def cl_init(self):
+        self.body_positions_cl_buffer = cl.GLBuffer(cl_context, mf.READ_WRITE, int(self.body_positions_vbo))
+        self.body_velocities_cl_buffer = cl.GLBuffer(cl_context, mf.READ_WRITE, int(self.body_velocities_vbo))
 
     def _gl_setup(self):
         '''Generate buffers'''
         self.vertex_array = gl.glGenVertexArrays(1)
         self.vertex_buffer = gl.glGenBuffers(1)
-        self._gl_pack()
+        #self._gl_pack()
+
+    def cleanup(self):
+        self.body_positions_vbo.delete()
+        self.body_velocities_vbo.delete()
 
     def _gl_pack(self):
         '''Transfer body data to gl buffer'''
         gl.glBindVertexArray(self.vertex_array)
 
-        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.vertex_buffer)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.body_positions_vbo)
 
         position = gl.glGetAttribLocation(shader, b'position')
         gl.glEnableVertexAttribArray(position)
 
-        gl.glVertexAttribPointer(position, 3, gl.GL_FLOAT, False, 4 * 3, ctypes.c_void_p(0))
+        gl.glVertexAttribPointer(position, 3, gl.GL_FLOAT, False, 0, None)
 
-        gl.glBufferData(gl.GL_ARRAY_BUFFER, self.body_count * 4 * 3, self.body_positions, gl.GL_DYNAMIC_DRAW)
+        #gl.glBufferData(gl.GL_ARRAY_BUFFER, self.body_count * 4 * 4, self.body_positions, gl.GL_DYNAMIC_DRAW)
 
+        
         # unbind stuff
         gl.glBindVertexArray(0)
-        gl.glDisableVertexAttribArray(position)
-        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
+        #gl.glDisableVertexAttribArray(position)
+        #gl.glBindBuffer(gl.GL_ARRAY_BUFFER, 0)
 
     def draw(self):
         global shader, eye_id
         r, g, b = self.color
-        gl.glColor4f(r, g, b, 1)
+        gl.glColor4f(r, g, b, 0.25)
         
-        gl.glBegin(gl.GL_POINTS)
+        
+        """gl.glBegin(gl.GL_POINTS)
         for i in range(self.body_count):
-            x, y, z = self.body_positions[i]
+            x, y, z, w = self.body_positions[i]
             #gl.glVertex3f(x, 0, z)
             gl.glVertex3f(x, y, z)
-        gl.glEnd()
-        
+        gl.glEnd()"""
+    
         self._gl_pack()
-        
+
         gl.glUseProgram(shader)
+
+        #position = gl.glGetAttribLocation(shader, b'position')
+        #gl.glEnableVertexAttribArray(position)
+
+        #print(gl.glGetDoublev(gl.GL_MODELVIEW_MATRIX))
 
         gl.glUniform1f(x_id, self.camera.position[0])
         gl.glUniform1f(y_id, self.camera.position[1])
         gl.glUniform1f(z_id, self.camera.position[2])
-        gl.glBindVertexArray(self.vertex_array)
-        #gl.glDrawArrays(gl.GL_POINTS, 0, self.body_count)
-        gl.glBindVertexArray(0)
 
+        gl.glBindVertexArray(self.vertex_array)
+        gl.glDrawArrays(gl.GL_POINTS, 0, self.body_count)
         gl.glUseProgram(0)
 
         if draw_axes:
@@ -192,49 +231,93 @@ class Galaxy():
             gl.glColor3f(0, 0, 1); gl.glVertex3f(x, y, z); gl.glVertex3f(x + f.x, y + f.y, z + f.z)
             gl.glEnd()
 
+
 class Universe():
 
-    G = 1
+    G = 100
     dt = 0.1
 
     def __init__(self, galaxies):
         self.galaxies = galaxies
-        self.num_galaxies = len(self.galaxies)
+        self.galaxy_count = len(self.galaxies)
+        self.body_count = self.galaxies[0].body_count
 
     def others(self, n):
         for i in range(0, n):
             yield i
-        for i in range(n+1, self.num_galaxies):
+        for i in range(n+1, self.galaxy_count):
             yield i
 
-    def step(self, delta_time):
-        centers = [galaxy.position for galaxy in self.galaxies]
+    def cl_init(self):
+        for galaxy in self.galaxies:
+            galaxy.cl_init()
 
-        for i in range(self.num_galaxies):
+    def cleanup(self):
+        for galaxy in self.galaxies:
+            galaxy.cleanup()
+
+    def step(self, delta_time):
+
+        if pause:
+            return
+
+        centers = np.ndarray((self.galaxy_count, 4), dtype=np.float32)
+        for i in range(self.galaxy_count):
+            centers[i][:3] = self.galaxies[i].position
+            centers[i][3]  = self.galaxies[i].mass
+
+        centers_buffer = clarray.to_device(cl_queue, centers)
+
+        gl.glFlush()
+        gl.glFinish()
+
+        for i, galaxy in enumerate(self.galaxies):
+            evt = cl.enqueue_acquire_gl_objects(cl_queue, [galaxy.body_positions_cl_buffer, galaxy.body_velocities_cl_buffer])
+
+            cl_kernel(cl_queue,
+                      (galaxy.body_count * 16,),
+                      None,
+                      galaxy.body_positions_cl_buffer,
+                      galaxy.body_velocities_cl_buffer,
+                      centers_buffer.data,
+                      np.uint(galaxy.body_count),
+                      np.uint(self.galaxy_count),
+                      np.float32(self.dt * delta_time),
+                      np.float32(self.G))
+            cl.enqueue_release_gl_objects(cl_queue, [galaxy.body_positions_cl_buffer, galaxy.body_velocities_cl_buffer])
+            cl_queue.finish()
+
+
+        centers = [mathutils.Vector((galaxy.position.x,
+                                     galaxy.position.y,
+                                     galaxy.position.z,
+                                     0)) for galaxy in self.galaxies]
+
+        for i in range(self.galaxy_count):
             this_galaxy = self.galaxies[i]
             f = mathutils.Vector((0, 0, 0))
             #f = np.zeros((3,), dtype=np.float32)
             for j in self.others(i):
-                delta_pos = mathutils.Vector(centers[j] - centers[i])
+                delta_pos = mathutils.Vector(centers[j] - centers[i]).xyz
                 f += delta_pos.normalized() * self.G / delta_pos.length_squared
             this_galaxy.velocity += f * delta_time * self.dt
             this_galaxy.position += this_galaxy.velocity * delta_time * self.dt
 
           
-            for j in range(this_galaxy.body_count):
-                f = mathutils.Vector((0, 0, 0))
+            """for index in range(this_galaxy.body_count):
+                f = mathutils.Vector((0, 0, 0, 0))
 
                 # update position
-                this_galaxy.body_positions[j] += this_galaxy.body_velocities[j] * delta_time * self.dt
-                pos = mathutils.Vector(this_galaxy.body_positions[j])
+                this_galaxy.body_positions[index] += this_galaxy.body_velocities[index] * delta_time * self.dt
+                pos = mathutils.Vector(this_galaxy.body_positions[index])
 
-                for k in range(self.num_galaxies):
+                for k in range(self.galaxy_count):
                     delta_pos = (centers[k] - pos)
                     f += delta_pos.normalized() * self.G / delta_pos.length_squared
                     #f += (delta_pos / np.linalg.norm(delta_pos)) * self.G / (np.linalg.norm(delta_pos) ** 2)
                                 
                 # update velocity
-                this_galaxy.body_velocities[j] += f * delta_time * self.dt
+                this_galaxy.body_velocities[index] += f * delta_time * self.dt"""
 
     def draw(self):
         for galaxy in self.galaxies:
@@ -263,7 +346,7 @@ class Camera():
 
     def step(self, delta_time):
         if self.rotate:
-            self.theta += delta_time * self.frequency * self.OOTP
+            self.theta += delta_time * self.frequency * 2.0 * math.pi
 
     @property
     def x(self):
@@ -336,23 +419,28 @@ class Controller():
             shaders.compileShader(vertex_shader, gl.GL_VERTEX_SHADER),
             shaders.compileShader(fragment_shader, gl.GL_FRAGMENT_SHADER),
         )
-        #gl.glLinkProgram(shader)
+        gl.glLinkProgram(shader)
         x_id = gl.glGetUniformLocation(shader, b'x')
         y_id = gl.glGetUniformLocation(shader, b'y')
         z_id = gl.glGetUniformLocation(shader, b'z')
 
         self.camera = Camera(0.1, 10)
         galaxies = []
-        for i in range(2):
+        for i in range(3):
             pos = Transform.random_vector() * 5
+            #pos = mathutils.Vector((0, 0, 0))
             galaxies.append(Galaxy(position=pos, mass=1, body_count=-1, color=self.COLORS[i], camera=self.camera))
 
         self.universe = Universe(galaxies)
         self.last_time = time.time()
 
+    def cl_init(self):
+        self.universe.cl_init()
+
     def quit(self):
-        draw_time = self.draw_time / self.num_frames
-        comp_time = self.compute_time / self.num_steps
+        self.universe.cleanup()
+        draw_time = self.draw_time / max(1, self.num_frames)
+        comp_time = self.compute_time / max(1, self.num_steps)
         print('Average draw time:  {:.2f} ms'.format(1000 * draw_time))
         print('Average frame time: {:.2f} ms'.format(1000 * comp_time))
         print('Average fps:        {:.2f} fps'.format(1.0 / (draw_time + comp_time)))
@@ -391,13 +479,20 @@ class Controller():
         gl.glMatrixMode(gl.GL_MODELVIEW)
         gl.glLoadIdentity()
         
-        glu.gluPerspective(30, self.width / self.height, 0, 100)
+        glu.gluPerspective(30, 1, 1, 100)
 
         x, y, z = self.camera.position
         glu.gluLookAt(x, y, z, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
 
         gl.glColor3f(1, 1, 1)
 
+        gl.glEnable(gl.GL_BLEND)
+        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE)
+        gl.glEnable(gl.GL_DEPTH_CLAMP)
+        gl.glEnable(gl.GL_POINT_SMOOTH)
+        gl.glEnable(gl.GL_LINE_SMOOTH)
+        gl.glPointSize(2.0)
+        gl.glLineWidth(2.0)
 
         if draw_grid:
             grid_width = 10
@@ -428,6 +523,7 @@ class Controller():
         self.camera.toggle_rotation()
 
 def initialize_scene():
+    return
     gl.glClearColor(0, 0, 0, 1)
     gl.glColor3f(1, 1, 1)
 
@@ -465,7 +561,7 @@ def reshape_cb(width, height):
     #glu.gluPerspective(45, width / height, 1, 100)
 
 def keyboard_cb(key, x, y):
-    global controller, draw_axes, draw_grid
+    global controller, draw_axes, draw_grid, pause
 
     if key == b'q':
         controller.quit()
@@ -478,6 +574,8 @@ def keyboard_cb(key, x, y):
         draw_axes = not draw_axes
     elif key == b'g':
         draw_grid = not draw_grid
+    elif key == b'p':
+        pause = not pause
     pass
 
 # mouse button state, True means pressed
@@ -524,7 +622,7 @@ def mouse_motion_cb(x, y):
 
 
 if __name__ == "__main__":
-    
+
     # Initialize GLUT library
     glut.glutInit()
 
@@ -545,9 +643,22 @@ if __name__ == "__main__":
     glut.glutMouseFunc(mouse_cb)
     glut.glutMotionFunc(mouse_motion_cb)
 
+    # must create VBOs before initializing openCL context???
+
     # Initialize simulation controller
     controller = Controller(screen_width, screen_height, 0)
 
+    # Initialize OpenCL
+    cl_platform = cl.get_platforms()[0]
+    cl_context  = cl.Context(
+        properties=[(cl.context_properties.PLATFORM, cl_platform)] + get_gl_sharing_context_properties())
+    cl_queue    = cl.CommandQueue(cl_context)
+    cl_program  = cl.Program(cl_context, open('gravity.c', 'r').read()).build()
+    cl_kernel   = cl_program.gravity
+
+    controller.cl_init()
+
+    
     # Begin main loop
     initialize_scene()
     glut.glutMainLoop()

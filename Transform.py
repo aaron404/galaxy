@@ -47,7 +47,6 @@ class Transform():
     def position(self, new_position):
         self._pos = new_position
 
-
     @property
     def up(self):
         return self.rot * self.UP
