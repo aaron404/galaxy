@@ -20,8 +20,10 @@ import pyopencl.cltypes as cltypes
 import pyopencl.array as clarray
 from pyopencl.tools import get_gl_sharing_context_properties
 
-
 from Transform import Transform
+
+import os
+os.environ["PYOPENCL_COMPILER_OUTPUT"] = "1"
 
 def timer(func):
     """Print the runtime of the decorated function"""
@@ -87,7 +89,7 @@ class Galaxy():
         self.body_velocities_cl_buffer = None
 
         if self.body_count < 0:
-            self.body_count = 100000
+            self.body_count = 1024
 
         self.vertex_array = None
         self.vertex_buffer = None
@@ -116,8 +118,8 @@ class Galaxy():
         self.body_velocities = np.ndarray((self.body_count, 3), dtype=np.float32)
 
         r1 = 0.5
-        r2 = 2.5
-        sigma = 0.25
+        r2 = 3
+        sigma = 0.5
 
         mu = (r1 + r2) / 2
         
@@ -125,8 +127,8 @@ class Galaxy():
 
             # radius is normally distributed around mu
             # phase is uniformly distributed 
-            theta = random.random() * 2 * math.pi
-            r = random.normalvariate(mu, sigma)
+            theta = 2 * math.pi * i / self.body_count #random.random() * 2 * math.pi / 4
+            r = r2 #random.normalvariate(mu, sigma)
             #height = 0.1 * (random.random() * 2 - 1) * math.exp(-((r - mu) ** 2.0) / (2.0 * sigma ** 2.0))
             height = 0
             body_position = mathutils.Vector((r * math.sin(theta), height, r * math.cos(theta)))
@@ -148,6 +150,9 @@ class Galaxy():
             self.body_velocities[i][0] = velocity.x
             self.body_velocities[i][1] = velocity.y
             self.body_velocities[i][2] = velocity.z
+            #self.body_velocities[i][3] = 0
+
+        #self.body_positions = np.reshape(self.body_positions, (self.body_count * 3,), order='C')
 
         # construct vertex buffer objects
         self.body_positions_vbo = vbo.VBO(data=self.body_positions, usage=gl.GL_DYNAMIC_DRAW, target=gl.GL_ARRAY_BUFFER)
@@ -209,7 +214,17 @@ class Galaxy():
         #position = gl.glGetAttribLocation(shader, b'position')
         #gl.glEnableVertexAttribArray(position)
 
-        #print(gl.glGetDoublev(gl.GL_MODELVIEW_MATRIX))
+        perspective_matrix_id = gl.glGetUniformLocation(shader, b'perspective_matrix')
+        gl.glUniformMatrix4fv(perspective_matrix_id,
+                              1,
+                              False,
+                              gl.glGetDoublev(gl.GL_PROJECTION_MATRIX))
+
+        modelview_matrix_id = gl.glGetUniformLocation(shader, b'modelview_matrix')
+        gl.glUniformMatrix4fv(modelview_matrix_id,
+                              1,
+                              False,
+                              gl.glGetDoublev(gl.GL_MODELVIEW_MATRIX))
 
         gl.glUniform1f(x_id, self.camera.position[0])
         gl.glUniform1f(y_id, self.camera.position[1])
@@ -234,7 +249,7 @@ class Galaxy():
 
 class Universe():
 
-    G = 100
+    G = 1
     dt = 0.1
 
     def __init__(self, galaxies):
@@ -275,7 +290,7 @@ class Universe():
             evt = cl.enqueue_acquire_gl_objects(cl_queue, [galaxy.body_positions_cl_buffer, galaxy.body_velocities_cl_buffer])
 
             cl_kernel(cl_queue,
-                      (galaxy.body_count * 16,),
+                      (galaxy.body_count,),
                       None,
                       galaxy.body_positions_cl_buffer,
                       galaxy.body_velocities_cl_buffer,
@@ -426,9 +441,9 @@ class Controller():
 
         self.camera = Camera(0.1, 10)
         galaxies = []
-        for i in range(3):
-            pos = Transform.random_vector() * 5
-            #pos = mathutils.Vector((0, 0, 0))
+        for i in range(1):
+            #pos = Transform.random_vector() * 5
+            pos = mathutils.Vector((0, 0, 0))
             galaxies.append(Galaxy(position=pos, mass=1, body_count=-1, color=self.COLORS[i], camera=self.camera))
 
         self.universe = Universe(galaxies)
