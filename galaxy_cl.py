@@ -89,7 +89,7 @@ class Galaxy():
         self.body_velocities_cl_buffer = None
 
         if self.body_count < 0:
-            self.body_count = 1024
+            self.body_count = 1000000
 
         self.vertex_array = None
         self.vertex_buffer = None
@@ -114,12 +114,12 @@ class Galaxy():
         self._gl_setup()
 
     def _generate_bodies(self):
-        self.body_positions = np.ndarray((self.body_count, 3), dtype=np.float32)
-        self.body_velocities = np.ndarray((self.body_count, 3), dtype=np.float32)
+        self.body_positions = np.ndarray((self.body_count, 4), dtype=np.float32)
+        self.body_velocities = np.ndarray((self.body_count, 4), dtype=np.float32)
 
-        r1 = 0.5
-        r2 = 3
-        sigma = 0.5
+        r1 = 2
+        r2 = 10
+        sigma = 1
 
         mu = (r1 + r2) / 2
         
@@ -127,19 +127,21 @@ class Galaxy():
 
             # radius is normally distributed around mu
             # phase is uniformly distributed 
-            theta = 2 * math.pi * i / self.body_count #random.random() * 2 * math.pi / 4
-            r = r2 #random.normalvariate(mu, sigma)
+            theta = random.random() * 2 * math.pi
+            r = random.normalvariate(mu, sigma)
+
             #height = 0.1 * (random.random() * 2 - 1) * math.exp(-((r - mu) ** 2.0) / (2.0 * sigma ** 2.0))
             height = 0
-            body_position = mathutils.Vector((r * math.sin(theta), height, r * math.cos(theta)))
-            body_position = self.transform.rot * body_position
-            body_position += self.position
+            body_position = self.position + self.transform.rot * \
+                mathutils.Vector((r * math.sin(theta), height, r * math.cos(theta)))
+            #body_position = self.transform.rot * body_position
+            #body_position += self.position
 
             self.body_positions[i][0] = body_position.x
             self.body_positions[i][1] = body_position.y
             self.body_positions[i][2] = body_position.z
-            #self.body_positions[i][3] = 0
-            
+            self.body_positions[i][3] = 1
+  
             # position relative to galaxy center
             delta = body_position - self.position
 
@@ -184,7 +186,7 @@ class Galaxy():
         position = gl.glGetAttribLocation(shader, b'position')
         gl.glEnableVertexAttribArray(position)
 
-        gl.glVertexAttribPointer(position, 3, gl.GL_FLOAT, False, 0, None)
+        gl.glVertexAttribPointer(position, 4, gl.GL_FLOAT, False, 0, None)
 
         #gl.glBufferData(gl.GL_ARRAY_BUFFER, self.body_count * 4 * 4, self.body_positions, gl.GL_DYNAMIC_DRAW)
 
@@ -249,7 +251,7 @@ class Galaxy():
 
 class Universe():
 
-    G = 1
+    G = 100
     dt = 0.1
 
     def __init__(self, galaxies):
@@ -287,8 +289,7 @@ class Universe():
         gl.glFinish()
 
         for i, galaxy in enumerate(self.galaxies):
-            evt = cl.enqueue_acquire_gl_objects(cl_queue, [galaxy.body_positions_cl_buffer, galaxy.body_velocities_cl_buffer])
-
+            cl.enqueue_acquire_gl_objects(cl_queue, [galaxy.body_positions_cl_buffer, galaxy.body_velocities_cl_buffer])
             cl_kernel(cl_queue,
                       (galaxy.body_count,),
                       None,
@@ -311,7 +312,7 @@ class Universe():
         for i in range(self.galaxy_count):
             this_galaxy = self.galaxies[i]
             f = mathutils.Vector((0, 0, 0))
-            #f = np.zeros((3,), dtype=np.float32)
+            #f = np.zeros((4,), dtype=np.float32)
             for j in self.others(i):
                 delta_pos = mathutils.Vector(centers[j] - centers[i]).xyz
                 f += delta_pos.normalized() * self.G / delta_pos.length_squared
