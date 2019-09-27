@@ -25,3 +25,52 @@ __kernel void gravity(__global float4* positions,
     }
     velocities[index] += force * dt;
 }
+
+/*
+ *
+state = 1
+def xorshift64s(seed=None):
+global state
+if seed:
+    state = seed
+
+    x = state
+    x ^= x >> 12
+    x ^= x << 25
+    x ^= x >> 27
+    x &= 0xffffffffffffffff
+    state = x
+    x = x * 0x2545f4914f6cdd1d
+    val = (x & 0xffffffff) / 0xffffffff
+    return val
+*/
+
+__kernel void init(__global float4* positions,
+                   __const  float   mu,
+                   __const  float   sigma) {
+
+    ulong index = get_global_id(0);
+    ulong state = index = 1;
+    ulong x = state;
+    float u, v;
+
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    state = x;
+
+    x = (x * 0x2545f4914f6cdd1d) & 0xffffffff;
+    u = sqrt(2.0f * log((float)x / (float)0xffffffff));
+
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+
+    x = (x * 0x2545f4914f6cdd1d) & 0xffffffff;
+    v = 2.0f * M_PI * (float)x / (float)0xffffffff;
+
+    float z0 = u * cos(v);
+    float z1 = u * sin(v);
+
+    float rand_normal = z0 * sigma * mu;
+}
