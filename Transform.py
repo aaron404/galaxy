@@ -2,6 +2,7 @@ import math
 import random
 
 import mathutils
+import numpy as np
 
 class Transform():
 
@@ -11,7 +12,7 @@ class Transform():
 
     def __init__(self, pos=None, rot=None, scale=None):
         self._pos = None
-        self.rot = None
+        self._rot = None
         self.scale = None
 
         if not pos:
@@ -20,7 +21,7 @@ class Transform():
             self._pos = mathutils.Vector(pos)
 
         if not rot:
-            self.rot = mathutils.Quaternion()
+            self._rot = mathutils.Quaternion()
         elif rot == -1:
             theta = math.acos(2.0 * random.random() - 1.0)
             phi = 2.0 * math.pi * random.random()
@@ -30,9 +31,9 @@ class Transform():
             z = math.sin(phi)
 
             psi = random.random() * 2.0 * math.pi
-            self.rot = mathutils.Quaternion((x, y, z), psi)
+            self._rot = mathutils.Quaternion((x, y, z), psi)
         else:
-            self.rot = mathutils.Quaternion(rot)
+            self._rot = mathutils.Quaternion(rot)
 
         if not scale:
             self.scale = mathutils.Vector((0, 0, 0))
@@ -43,21 +44,28 @@ class Transform():
     def position(self):
         return self._pos
 
+    def position4(self):
+        return mathutils.Vector((self._pos.x, self._pos.y, self_pos.z, 0))
+
     @position.setter
     def position(self, new_position):
         self._pos = new_position
 
     @property
+    def rotation(self):
+        return self._rot
+
+    @property
     def up(self):
-        return self.rot * self.UP
+        return self._rot * self.UP
 
     @property
     def forward(self):
-        return self.rot * self.FORWARD
+        return self._rot * self.FORWARD
 
     @property
     def right(self):
-        return self.rot * self.RIGHT
+        return self._rot * self.RIGHT
 
     @staticmethod
     def random_vector():
